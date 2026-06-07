@@ -1,0 +1,111 @@
+/* theme: techai-editorial — TechAI brand customized editorial-serif */
+:root{
+  /* TechAI Brand Colors */
+  --bg: #faf9f6;              /* warm off-white */
+  --bg-soft: #f2f0eb;         /* warm neutral */
+  --surface: #fffdf8;         /* warm paper for cards */
+  --surface-2: #edfaf9;        /* accent wash (light teal) */
+  --border: #d4d0c8;          /* warm gray border */
+  --border-strong: #b8b4ac;    /* stronger border for emphasis */
+
+  /* Text Colors */
+  --text-1: #0d0d0d;          /* near black - primary text */
+  --text-2: #4a4a4a;          /* dark gray - secondary text */
+  --text-3: #6b6b6b;          /* medium gray - tertiary text */
+
+  /* TechAI Accent Colors */
+  --accent: #04CCBA;          /* TechAI teal - primary accent */
+  --accent-2: #03B8A8;        /* darker teal for hover states */
+  --accent-3: #02A496;        /* even darker for emphasis */
+
+  /* Semantic Colors */
+  --good: #3f7d4f;            /* green - success */
+  --warn: #b07a1f;            /* orange - warning */
+  --bad: #c44d1c;             /* red - error */
+
+  /* Gradients */
+  --grad: linear-gradient(135deg, #04CCBA, #03B8A8);
+  --grad-soft: linear-gradient(135deg, #faf9f6, #f2f0eb);
+
+  /* Spacing & Radius */
+  --radius: 4px;
+  --radius-sm: 2px;
+  --radius-lg: 8px;
+
+  /* Shadows */
+  --shadow: 0 2px 12px rgba(13, 13, 13, 0.06);
+  --shadow-lg: 0 20px 50px rgba(13, 13, 13, 0.14);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-display: 'Playfair Display', 'Georgia', serif;
+  --font-serif: 'Playfair Display', 'Georgia', serif;
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+  --letter-tight: -0.02em;
+}
+
+/* TechAI-specific overrides for key elements */
+.h1, .h2, h1.title, h2.title {
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+/* Emphasis slides use serif for big ideas */
+.emphasis-slide {
+  font-family: var(--font-display);
+}
+
+/* Mono only for code, formulas, and labels */
+code, .mono, .label, .formula {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+/* Accent dividers */
+.divider-accent {
+  border-color: var(--accent);
+}
+
+/* Claim slides - big typography */
+.claim-slide h1 {
+  font-family: var(--font-display);
+  font-size: 3.5rem;
+  line-height: 1.1;
+  color: var(--text-1);
+}
+
+/* Quiz/poll slide styling */
+.quiz-option {
+  border: 2px solid var(--border);
+  padding: 1rem 1.5rem;
+  border-radius: var(--radius);
+  transition: all 0.2s ease;
+}
+
+.quiz-option:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+/* Formula slide - centered, large */
+.formula-slide {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  color: var(--text-1);
+  background: var(--surface-2);
+  padding: 2rem;
+  border-radius: var(--radius-lg);
+}
+
+/* Aha moment slide */
+.aha-slide {
+  background: var(--surface-2);
+  border-left: 4px solid var(--accent);
+  padding: 2rem;
+}
+
+.aha-slide h1 {
+  color: var(--accent);
+}
