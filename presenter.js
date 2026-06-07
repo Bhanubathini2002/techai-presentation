@@ -134,6 +134,45 @@
     setTimeout(updatePresenterWindow, 100);
   }
 
+  // Floating navigation buttons
+  if (previewIndexParam() === null) {
+    const baseStyle = [
+      'position:fixed',
+      'bottom:1.5rem',
+      'z-index:1000',
+      'padding:0.75rem 1.25rem',
+      'font:600 0.95rem/1 "IBM Plex Mono","SF Mono",monospace',
+      'color:#fffdf8',
+      'background:#1a1a1a',
+      'border:none',
+      'border-radius:8px',
+      'cursor:pointer',
+      'box-shadow:0 4px 12px rgba(0,0,0,0.25)'
+    ].join(';');
+
+    const prevBtn = document.createElement('button');
+    prevBtn.id = 'prevSlideBtn';
+    prevBtn.type = 'button';
+    prevBtn.textContent = '← Back';
+    prevBtn.setAttribute('aria-label', 'Previous slide');
+    prevBtn.style.cssText = baseStyle + ';right:8.5rem';
+    prevBtn.addEventListener('click', () => showSlide(currentSlide - 1));
+    document.body.appendChild(prevBtn);
+
+    const nextBtn = document.createElement('button');
+    nextBtn.id = 'nextSlideBtn';
+    nextBtn.type = 'button';
+    nextBtn.textContent = 'Next →';
+    nextBtn.setAttribute('aria-label', 'Next slide');
+    nextBtn.style.cssText = baseStyle + ';right:1.5rem';
+    nextBtn.addEventListener('click', () => showSlide(currentSlide + 1));
+    document.body.appendChild(nextBtn);
+  }
+
+  function previewIndexParam() {
+    return new URLSearchParams(window.location.search).get('preview');
+  }
+
   // Keyboard navigation
   document.addEventListener('keydown', (e) => {
     // Don't interfere if user is typing in an input
