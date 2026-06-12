@@ -37,6 +37,17 @@
     });
 
     updatePresenterWindow();
+
+    // Keep ?slide=N in sync so any slide is deep-linkable
+    if (previewIndexParam() === null) {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('slide', index + 1);
+        history.replaceState(null, '', url);
+      } catch (e) {
+        // file:// origins may block replaceState — deep links still work on load
+      }
+    }
   }
 
   // Update presenter window if open
@@ -208,9 +219,14 @@
   // Check for preview mode (for presenter window)
   const params = new URLSearchParams(window.location.search);
   const previewIndex = params.get('preview');
+  const slideParam = params.get('slide');
   if (previewIndex !== null) {
     showSlide(parseInt(previewIndex));
     document.body.classList.add('presenter-preview');
+  } else if (slideParam !== null) {
+    // Deep link: 1-based, clamped to valid range
+    const target = Math.min(Math.max(parseInt(slideParam, 10) || 1, 1), totalSlides);
+    showSlide(target - 1);
   } else {
     // Initialize first slide
     showSlide(0);

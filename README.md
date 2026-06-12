@@ -11,7 +11,7 @@
 <br>
 
 ![Made with HTML](https://img.shields.io/badge/Made%20with-HTML%2FCSS%2FJS-04CCBA?style=for-the-badge)
-![Slides](https://img.shields.io/badge/Slides-58-04CCBA?style=for-the-badge)
+![Slides](https://img.shields.io/badge/Slides-61-04CCBA?style=for-the-badge)
 ![No build step](https://img.shields.io/badge/Build%20step-none-03B8A8?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-03B8A8?style=for-the-badge)
 
@@ -31,7 +31,7 @@ No framework. No `npm install`. No server required. Just open it and present.
 
 | | |
 |---|---|
-| 🎬 **58 hand-built slides** | Title, pop quizzes, myth reveals, pricing breakdowns, and a closing CTA |
+| 🎬 **61 hand-built slides** | Title, pop quizzes, myth reveals, pricing breakdowns, a 3-slide MCP mini-explainer, and a closing CTA |
 | ⌨️ **Keyboard-driven** | Arrow keys, space, `Home`/`End` — drive the whole deck without a mouse |
 | 🖥️ **Presenter mode** | Press `S` to pop out a dual-pane view with current + next slide and live notes |
 | 🎨 **Custom editorial theme** | Warm-paper palette, Playfair Display headlines, TechAI teal `#04CCBA` accents |
@@ -76,6 +76,8 @@ That's the whole setup. There is no build step. 🎉
 
 > 💡 **Tip:** Open presenter mode on your laptop, mirror the main window to the projector, and your notes stay private.
 
+> 🔗 **Deep links:** open `index.html?slide=31` to jump straight to slide 31. The URL stays in sync as you navigate, so you can bookmark or share any slide.
+
 ---
 
 ## 🧭 What's Inside the Talk
@@ -87,6 +89,7 @@ The narrative is structured to flip beliefs, not just dump facts:
 - **💰 Pricing Teardowns** — GLM, Kimi, and friends, with real numbers
 - **📊 My Proof** — actual daily token usage and spend
 - **🛠️ The Playbook** — from goals to missions, the `/goal` workflow, caching, and a curated shortlist
+- **🔌 MCP in 3 Slides** — what the Model Context Protocol is, how it works, why it matters
 - **🎯 Closing CTA** — a business framework and a way to connect
 
 ---
@@ -95,7 +98,7 @@ The narrative is structured to flip beliefs, not just dump facts:
 
 ```
 site/
-├── index.html            # The deck — all 58 slides live here
+├── index.html            # The deck — all 61 slides live here
 ├── presenter.js          # Keyboard navigation + presenter window
 ├── base.css              # Layout & deck primitives
 ├── techai-theme.css      # TechAI brand colors & typography tokens

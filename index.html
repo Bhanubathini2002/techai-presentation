@@ -844,6 +844,66 @@
     </aside>
   </section>
 
+  <!-- ============ SLIDE 30B: MCP - WHAT IT IS ============ -->
+  <section class="slide" data-title="MCP - What It Is">
+    <p class="kicker">New topic: MCP</p>
+    <h2 class="h2">Model Context Protocol</h2>
+    <p class="lede mt-m">Think of it as <span style="color:var(--accent)">USB-C for AI</span> — one plug, every tool.</p>
+    <div class="stack mt-l">
+      <div class="list-row">An open standard for connecting AI agents to tools and data</div>
+      <div class="list-row">Started by Anthropic, now adopted across the industry</div>
+      <div class="list-row">Build one integration — every MCP-aware app can use it</div>
+    </div>
+    <aside class="notes">
+      <p>Audience just learned /goal and missions. Natural question: how does the agent actually reach my tools?</p>
+      <p>Answer: MCP. Before MCP, every app needed custom glue code for every tool.</p>
+      <p>The USB-C analogy lands well — one standard port instead of a drawer full of proprietary cables.</p>
+    </aside>
+  </section>
+
+  <!-- ============ SLIDE 30C: MCP - HOW IT WORKS ============ -->
+  <section class="slide" data-title="MCP - How It Works">
+    <p class="kicker">Under the hood</p>
+    <h2 class="h2">Servers expose tools.<br>Agents discover and call them.</h2>
+    <div class="flow-box mt-l">
+      <p class="mono">1. Your AI app is the host (Claude, Cursor, your agent)</p>
+      <p class="mono">2. An MCP server wraps a tool: GitHub, database, files</p>
+      <p class="mono">3. The agent asks: what can you do?</p>
+      <p class="mono">4. It calls tools, reads data - with your permission</p>
+    </div>
+    <aside class="notes">
+      <p>Three roles: host app, MCP client inside it, MCP servers around it.</p>
+      <p>Servers expose three things: tools the agent can call, resources it can read, and prompts it can reuse.</p>
+      <p>Permission stays with the user. The agent discovers capabilities; you approve the actions.</p>
+    </aside>
+  </section>
+
+  <!-- ============ SLIDE 30D: MCP - WHY IT MATTERS ============ -->
+  <section class="slide" data-title="MCP - Why It Matters">
+    <p class="kicker">Why it matters</p>
+    <h2 class="h2">Glue code multiplies.<br>Standards add.</h2>
+    <div class="split-view mt-l">
+      <div class="split-left">
+        <p class="label">WITHOUT MCP</p>
+        <p>Custom code per app, per tool</p>
+        <p>N apps × M tools</p>
+        <p>Integrations break alone</p>
+      </div>
+      <div class="split-right">
+        <p class="label" style="color:var(--accent)">WITH MCP</p>
+        <p>One server per tool</p>
+        <p>N apps + M tools</p>
+        <p>Reuse a growing ecosystem</p>
+      </div>
+    </div>
+    <p class="mt-l" style="color:var(--accent)">Your /goal agents can now reach your real tools.</p>
+    <aside class="notes">
+      <p>The math is the point: N times M custom integrations collapse to N plus M.</p>
+      <p>Thousands of community MCP servers already exist — most tools you use are already covered.</p>
+      <p>Tie back to the talk: cheap tokens plus agentic loops plus MCP access to your real systems is the full playbook.</p>
+    </aside>
+  </section>
+
   <!-- ============ SLIDE 30: GLM PRICING ============ -->
   <section class="slide" data-title="GLM Pricing">
     <p class="kicker">Where to get open source</p>
