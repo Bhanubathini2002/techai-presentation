@@ -37,13 +37,13 @@
     </aside>
   </section>
 
-  <!-- ============ SLIDE 2: SEMANTIC ZOOM DEMO ============ -->
+  <!-- ============ SLIDE 2: SEMANTIC ZOOM 3D DEMO ============ -->
   <section class="slide" data-title="Semantic Zoom Demo" style="padding:0">
-    <iframe src="semantic-zoom.html" title="Semantic zoom: PDF page to vector space"
+    <iframe src="semantic-zoom-3d.html" title="Semantic zoom 3D: PDF page to vector space"
             style="position:absolute; inset:0; width:100%; height:100%; border:0; background:#070B16;"></iframe>
     <aside class="notes">
-      <p>Interactive demo: scroll (or pinch) to travel from the raw PDF page, through layout detection, into the embedding vector space.</p>
-      <p>Click "fly in" to auto-play the journey hands-free. Press R inside the demo to reset.</p>
+      <p>Interactive 3D demo: drag to orbit, scroll (or pinch) to travel from the raw PDF page, through layout detection and the encoder, into the Qdrant vector space.</p>
+      <p>Hover boxes for extractor JSON, hover chunks for metadata, click a chunk for nearest neighbours. "Run retrieval" (or Q) fires a live query. F flies hands-free, R resets, 1–4 jump stages.</p>
       <p>Narrative: this is literally what our parser does — page → bounding boxes → chunks → vectors in Qdrant.</p>
     </aside>
   </section>

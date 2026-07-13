@@ -1,0 +1,1066 @@
+import React, { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+
+// ============================================================================
+// Semantic Zoom · RAG — 3D
+// One scalar L (0..5) drives the whole journey:
+//   PDF page → layout bboxes (extruded) → chunks fly through encoder → Qdrant space
+// Interactions: drag = orbit · wheel / pinch = travel · hover bbox = extractor JSON
+//               hover chunk = metadata · click chunk = nearest neighbours
+//               Q / button = retrieval demo · F fly · R reset · 1-4 jump stages
+// three r128 compatible — custom orbit controller, no OrbitControls dependency.
+// ============================================================================
+
+// ---------- math helpers ----------
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const smoothstep = (t) => { const x = clamp(t, 0, 1); return x * x * (3 - 2 * x); };
+const band = (v, a, b) => smoothstep((v - a) / (b - a));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function mulberry32(seed) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- document layout ----------
+// x,y,w,h in % of page · e = 3D embedding coords in [-1,1]³ (UMAP-style)
+// In production this comes from Docling/PaddleOCR JSON + UMAP of bge-m3 vectors.
+const ELEMENTS = [
+  { id: "title", type: "Title",   x: 8,  y: 4.5,  w: 84, h: 7,    c: "#818CF8", e: [-0.12, 0.66,  0.50], tok: 18  },
+  { id: "meta",  type: "Meta",    x: 8,  y: 13,   w: 64, h: 3.5,  c: "#22D3EE", e: [ 0.46, 0.52,  0.62], tok: 12  },
+  { id: "habs",  type: "Header",  x: 8,  y: 19.5, w: 22, h: 3.2,  c: "#A78BFA", e: [ 0.04, 0.50,  0.30], tok: 4   },
+  { id: "abs",   type: "Text",    x: 8,  y: 24,   w: 84, h: 10,   c: "#34D399", e: [-0.50,-0.02, -0.14], tok: 96  },
+  { id: "p1",    type: "Text",    x: 8,  y: 37.5, w: 40, h: 15,   c: "#34D399", e: [-0.64,-0.22, -0.36], tok: 340 },
+  { id: "p2",    type: "Text",    x: 8,  y: 54.5, w: 40, h: 13,   c: "#34D399", e: [-0.38,-0.32, -0.20], tok: 310 },
+  { id: "tbl",   type: "Table",   x: 8,  y: 69.5, w: 40, h: 16,   c: "#F87171", e: [ 0.58,-0.52, -0.50], tok: 210 },
+  { id: "cap1",  type: "Caption", x: 8,  y: 87,   w: 40, h: 3,    c: "#22D3EE", e: [ 0.62, 0.30,  0.44], tok: 22  },
+  { id: "p3",    type: "Text",    x: 52, y: 37.5, w: 40, h: 10,   c: "#34D399", e: [-0.52,-0.46, -0.44], tok: 280 },
+  { id: "fig",   type: "Figure",  x: 52, y: 49.5, w: 40, h: 15.5, c: "#FBBF24", e: [ 0.76,-0.16, -0.56], tok: 64  },
+  { id: "cap2",  type: "Caption", x: 52, y: 66.5, w: 40, h: 3,    c: "#22D3EE", e: [ 0.38, 0.42,  0.52], tok: 19  },
+  { id: "p4",    type: "Text",    x: 52, y: 71.5, w: 40, h: 19,   c: "#34D399", e: [-0.28,-0.10, -0.04], tok: 295 },
+];
+
+const L_MAX = 5;
+const STAGES = [
+  { at: 0.0, name: "PDF page",            sub: "PyMuPDF · 3–4× DPI render" },
+  { at: 1.5, name: "Layout detection",    sub: "Docling / PaddleOCR bounding boxes" },
+  { at: 2.9, name: "Chunks → embeddings", sub: "bge-m3 · 1024-d vectors" },
+  { at: 4.2, name: "Vector space",        sub: "Qdrant · this page inside the corpus" },
+];
+
+const MONO = "ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace";
+
+// world geometry
+const PW = 7.5, PH = 10;                       // page plane size
+const CLOUD = new THREE.Vector3(0, 0, -34);    // embedding-space centre
+const SPREAD = new THREE.Vector3(9, 7.5, 8);   // cloud extents
+const ENC_Z = -14;                             // encoder ring z
+
+const QUERY = {
+  text: "tier routing accuracy on scanned forms?",
+  e: [0.50, -0.42, -0.42],
+};
+
+// ---------- canvas texture factories ----------
+function roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function wrapFill(ctx, text, x, y, maxW, lineH, maxLines = 99) {
+  const words = text.split(" ");
+  let line = "", ln = 0;
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? line + " " + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, y + ln * lineH);
+      line = words[i];
+      if (++ln >= maxLines) return;
+    } else line = test;
+  }
+  if (line) ctx.fillText(line, x, y + ln * lineH);
+}
+
+function makePaperTexture(renderer) {
+  const W = 920, H = Math.round(W * (PH / PW));
+  const cv = document.createElement("canvas");
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext("2d");
+  const px = (p) => (p / 100) * W;
+  const py = (p) => (p / 100) * H;
+
+  ctx.fillStyle = "#FBFAF6";
+  ctx.fillRect(0, 0, W, H);
+
+  // title
+  ctx.fillStyle = "#1C1B18";
+  ctx.font = `700 ${W * 0.049}px -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  ctx.textBaseline = "top";
+  ctx.fillText("Attention-Guided Retrieval for", px(8), py(4.5));
+  ctx.fillText("Multi-Tenant Document QA", px(8), py(4.5) + W * 0.058);
+
+  // meta
+  ctx.fillStyle = "#6B6A63";
+  ctx.font = `400 ${W * 0.024}px -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  ctx.fillText("U. Prathipati, et al. · Document Analyzer Group · 2026", px(8), py(13.4));
+
+  // ABSTRACT header
+  ctx.fillStyle = "#3B3A34";
+  ctx.font = `700 ${W * 0.023}px -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  const hdr = "ABSTRACT";
+  let hx = px(8);
+  for (const ch of hdr) { ctx.fillText(ch, hx, py(19.8)); hx += ctx.measureText(ch).width + W * 0.004; }
+
+  // abstract body
+  ctx.fillStyle = "#4A4942";
+  ctx.font = `400 ${W * 0.0205}px -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  wrapFill(
+    ctx,
+    "We present a tiered extraction pipeline that routes each page through PyMuPDF, Docling, or OCR via a difficulty classifier. Detected layout regions are chunked, embedded with bge-m3, and indexed per tenant in Qdrant. Retrieval fuses BM25 and dense scores with reciprocal rank fusion.",
+    px(8), py(24.4), px(84), W * 0.030, 5
+  );
+
+  // greek-line paragraph blocks
+  const greek = (rx, ry, rw, rh, seed) => {
+    const r = mulberry32(seed);
+    const barH = W * 0.008, gap = W * 0.008;
+    let y = py(ry);
+    const bottom = py(ry + rh);
+    let i = 0;
+    ctx.fillStyle = "#D8D6CC";
+    while (y + barH <= bottom) {
+      const wFrac = (i % 7 === 6 ? 0.55 : 1) * (0.62 + r() * 0.38);
+      roundedRect(ctx, px(rx), y, px(rw) * wFrac, barH, 2);
+      ctx.fill();
+      y += barH + gap;
+      i++;
+    }
+  };
+  greek(8, 37.5, 40, 15, 7);
+  greek(8, 54.5, 40, 13, 19);
+  greek(52, 37.5, 40, 10, 31);
+  greek(52, 71.5, 40, 19, 53);
+
+  // table
+  {
+    const tx = px(8), ty = py(69.5), tw = px(40), th = py(16);
+    const cols = [0, 0.41, 0.705, 1].map((f) => tx + tw * f);
+    const rows = 5;
+    for (let r0 = 0; r0 < rows; r0++) {
+      for (let c0 = 0; c0 < 3; c0++) {
+        const cx = cols[c0], cw = cols[c0 + 1] - cols[c0];
+        const cy = ty + (th / rows) * r0, ch = th / rows;
+        ctx.fillStyle = r0 === 0 ? "#ECEAE0" : "#FFFFFF";
+        ctx.fillRect(cx, cy, cw, ch);
+        ctx.strokeStyle = "#C8C6BC";
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(cx, cy, cw, ch);
+        ctx.fillStyle = r0 === 0 ? "#B9B7AC" : "#DDDBD1";
+        const bw = cw * (r0 === 0 ? 0.7 : 0.45 + (((r0 * 3 + c0) * 37) % 40) / 100);
+        roundedRect(ctx, cx + cw * 0.12, cy + ch * 0.36, bw * 0.76, ch * 0.26, 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // chart
+  {
+    const cx = px(52), cy = py(49.5), cw = px(40), ch = py(15.5);
+    ctx.fillStyle = "#F4F3EC";
+    roundedRect(ctx, cx, cy, cw, ch, 6);
+    ctx.fill();
+    const bars = [0.45, 0.7, 0.55, 0.85, 0.65, 0.95, 0.8];
+    const pad = cw * 0.045, bw = (cw - pad * 2) / bars.length;
+    bars.forEach((b, i) => {
+      ctx.fillStyle = i === 5 ? "#8B93E8" : "#C3C8EE";
+      const bh = (ch - pad * 2) * b;
+      roundedRect(ctx, cx + pad + i * bw + bw * 0.12, cy + ch - pad - bh, bw * 0.76, bh, 4);
+      ctx.fill();
+    });
+  }
+
+  // captions
+  ctx.fillStyle = "#807F76";
+  ctx.font = `italic 400 ${W * 0.019}px -apple-system, 'Segoe UI', Roboto, sans-serif`;
+  ctx.fillText("Table 1: Tier routing accuracy by document class.", px(8), py(87.2));
+  ctx.fillText("Figure 2: Recall@10 across fusion weights.", px(52), py(66.7));
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.encoding = THREE.sRGBEncoding;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  return tex;
+}
+
+function makeRadialTexture(size, inner, mid) {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d");
+  const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  g.addColorStop(0, inner);
+  g.addColorStop(0.35, mid);
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  return new THREE.CanvasTexture(cv);
+}
+
+function makeTextSprite(text, opts = {}) {
+  const {
+    font = `600 30px ${MONO}`, color = "#C6CEE2", bg = null,
+    padX = 14, padY = 8, scalePerPx = 0.0075, fog = true,
+  } = opts;
+  const cv = document.createElement("canvas");
+  const ctx = cv.getContext("2d");
+  ctx.font = font;
+  const tw = Math.ceil(ctx.measureText(text).width);
+  const th = 40;
+  cv.width = tw + padX * 2;
+  cv.height = th + padY * 2;
+  const c2 = cv.getContext("2d");
+  if (bg) {
+    c2.fillStyle = bg;
+    roundedRect(c2, 0, 0, cv.width, cv.height, 6);
+    c2.fill();
+  }
+  c2.font = font;
+  c2.fillStyle = color;
+  c2.textBaseline = "middle";
+  c2.fillText(text, padX, cv.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.encoding = THREE.sRGBEncoding;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, fog });
+  const sp = new THREE.Sprite(mat);
+  sp.scale.set(cv.width * scalePerPx, cv.height * scalePerPx, 1);
+  return sp;
+}
+
+// ============================================================================
+export default function SemanticZoomRAG3D() {
+  const mountRef = useRef(null);
+  const tooltipRef = useRef(null);
+  const railDotRef = useRef(null);
+  const legendRef = useRef(null);
+  const stageNumRef = useRef(null);
+  const stageNameRef = useRef(null);
+  const stageSubRef = useRef(null);
+  const apiRef = useRef({});
+
+  const [stageIdx, setStageIdx] = useState(0);
+  const [flyUi, setFlyUi] = useState(0);
+  const [panel, setPanel] = useState(null); // {kind:'nn'|'query', ...}
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+    const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // ---------------- renderer / scene / camera ----------------
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.domElement.style.display = "block";
+    mount.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x070b16, 0.0105);
+
+    const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 0.1, 500);
+
+    // ---------------- page (paper on a plane) ----------------
+    const pageGroup = new THREE.Group();
+    scene.add(pageGroup);
+
+    const paperTex = makePaperTexture(renderer);
+    const paperMat = new THREE.MeshBasicMaterial({ map: paperTex, transparent: true, side: THREE.DoubleSide });
+    const paper = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH), paperMat);
+    pageGroup.add(paper);
+    // soft backing shadow
+    const shadowMat = new THREE.SpriteMaterial({
+      map: makeRadialTexture(256, "rgba(0,0,0,0.55)", "rgba(0,0,0,0.28)"),
+      transparent: true, depthWrite: false,
+    });
+    const shadow = new THREE.Sprite(shadowMat);
+    shadow.scale.set(PW * 1.55, PH * 1.4, 1);
+    shadow.position.z = -0.6;
+    pageGroup.add(shadow);
+
+    // element-local world coords on the page plane
+    const elWorld = ELEMENTS.map((el) => ({
+      cx: ((el.x + el.w / 2) / 100 - 0.5) * PW,
+      cy: (0.5 - (el.y + el.h / 2) / 100) * PH,
+      w: (el.w / 100) * PW,
+      h: (el.h / 100) * PH,
+    }));
+
+    const confRnd = mulberry32(1234);
+    const confs = ELEMENTS.map(() => 0.9 + confRnd() * 0.09);
+
+    // ---------------- extruded bounding boxes ----------------
+    const boxMeshes = [];
+    const boxEntries = ELEMENTS.map((el, i) => {
+      const g = elWorld[i];
+      const depth = 0.3;
+      const grp = new THREE.Group();
+      grp.position.set(g.cx, g.cy, 0);
+      const color = new THREE.Color(el.c);
+
+      const fillMat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.13, depthWrite: false, side: THREE.DoubleSide,
+      });
+      const box = new THREE.Mesh(new THREE.BoxGeometry(g.w, g.h, depth), fillMat);
+      box.position.z = depth / 2;
+      box.userData = { kind: "box", idx: i };
+      grp.add(box);
+      boxMeshes.push(box);
+
+      const edgeMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 });
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(g.w, g.h, depth)), edgeMat);
+      edges.position.z = depth / 2;
+      grp.add(edges);
+
+      const chip = makeTextSprite(el.type.toUpperCase(), {
+        font: `700 26px ${MONO}`, color: "#0B1020", bg: el.c, padX: 12, padY: 6, scalePerPx: 0.0062,
+      });
+      chip.center.set(0, 0);
+      chip.position.set(-g.w / 2, g.h / 2 + 0.06, depth + 0.02);
+      grp.add(chip);
+
+      pageGroup.add(grp);
+      return { grp, box, edges, chip, fillMat, edgeMat };
+    });
+
+    // ---------------- chunks (spheres + glow + label) ----------------
+    const glowTex = makeRadialTexture(128, "rgba(255,255,255,0.9)", "rgba(255,255,255,0.32)");
+    const chunkEntries = [];
+    const chunkMeshes = [];
+    const sphereGeo = new THREE.SphereGeometry(0.3, 24, 18);
+
+    const startPos = elWorld.map((g) => new THREE.Vector3(g.cx, g.cy, 0.22));
+    const midPos = elWorld.map((g) => new THREE.Vector3(g.cx * 0.28, g.cy * 0.28, ENC_Z));
+    const endPos = ELEMENTS.map((el) =>
+      new THREE.Vector3(
+        CLOUD.x + el.e[0] * SPREAD.x,
+        CLOUD.y + el.e[1] * SPREAD.y,
+        CLOUD.z + el.e[2] * SPREAD.z
+      )
+    );
+
+    ELEMENTS.forEach((el, i) => {
+      const grp = new THREE.Group();
+      const color = new THREE.Color(el.c);
+      const mat = new THREE.MeshBasicMaterial({ color: color.clone().lerp(new THREE.Color("#ffffff"), 0.15) });
+      const sph = new THREE.Mesh(sphereGeo, mat);
+      sph.userData = { kind: "chunk", idx: i };
+      grp.add(sph);
+      chunkMeshes.push(sph);
+
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: glowTex, color: el.c, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, fog: true,
+      }));
+      glow.scale.set(1.7, 1.7, 1);
+      grp.add(glow);
+
+      const label = makeTextSprite(`${el.type.toLowerCase()} · ${el.tok} tok`, {
+        font: `500 26px ${MONO}`, color: "#C6CEE2", scalePerPx: 0.0064,
+      });
+      label.center.set(0.5, 2.1);
+      label.material.opacity = 0;
+      grp.add(label);
+
+      grp.position.copy(startPos[i]);
+      grp.visible = false;
+      scene.add(grp);
+      chunkEntries.push({ grp, sph, glow, label, mat, baseColor: mat.color.clone() });
+    });
+
+    // ---------------- encoder gate ----------------
+    const encoder = new THREE.Group();
+    encoder.position.set(0, 0, ENC_Z);
+    const ringMat1 = new THREE.MeshBasicMaterial({
+      color: 0x818cf8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const ringMat2 = ringMat1.clone(); ringMat2.color = new THREE.Color(0x22d3ee);
+    const ring1 = new THREE.Mesh(new THREE.TorusGeometry(2.3, 0.05, 12, 72), ringMat1);
+    const ring2 = new THREE.Mesh(new THREE.TorusGeometry(1.65, 0.032, 12, 64), ringMat2);
+    encoder.add(ring1, ring2);
+    const encLabel = makeTextSprite("bge-m3 encoder · chunks → 1024-d vectors", {
+      font: `500 26px ${MONO}`, color: "#B9C2D8", scalePerPx: 0.009, fog: false,
+    });
+    encLabel.position.set(0, -3.2, 0);
+    encLabel.material.opacity = 0;
+    encoder.add(encLabel);
+    scene.add(encoder);
+
+    // ---------------- corpus cloud / grid / axes ----------------
+    const dotTex = makeRadialTexture(64, "rgba(255,255,255,1)", "rgba(255,255,255,0.4)");
+    const corpusRnd = mulberry32(42);
+    const gauss = () => {
+      const u = Math.max(corpusRnd(), 1e-6), v = corpusRnd();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+    const centers = [
+      [-0.5, -0.2, -0.25], [0.6, -0.45, -0.4], [0.75, -0.1, -0.55],
+      [0.45, 0.4, 0.45], [0.1, 0.55, 0.45],
+    ];
+    const buildCorpus = (count, clustered) => {
+      const pos = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) {
+        let x, y, z;
+        if (clustered && corpusRnd() < 0.8) {
+          const c = centers[Math.floor(corpusRnd() * centers.length)];
+          x = c[0] + gauss() * 0.2; y = c[1] + gauss() * 0.2; z = c[2] + gauss() * 0.2;
+        } else {
+          x = (corpusRnd() * 2 - 1) * 1.05; y = (corpusRnd() * 2 - 1) * 1.05; z = (corpusRnd() * 2 - 1) * 1.05;
+        }
+        pos[i * 3] = CLOUD.x + x * SPREAD.x;
+        pos[i * 3 + 1] = CLOUD.y + y * SPREAD.y;
+        pos[i * 3 + 2] = CLOUD.z + z * SPREAD.z;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      return geo;
+    };
+    const corpusNearMat = new THREE.PointsMaterial({
+      color: 0x7e8aa8, size: 0.24, map: dotTex, transparent: true, opacity: 0,
+      depthWrite: false, sizeAttenuation: true, blending: THREE.AdditiveBlending,
+    });
+    const corpusFarMat = corpusNearMat.clone();
+    corpusFarMat.color = new THREE.Color(0x5a6580);
+    corpusFarMat.size = 0.14;
+    const corpusNear = new THREE.Points(buildCorpus(380, true), corpusNearMat);
+    const corpusFar = new THREE.Points(buildCorpus(420, true), corpusFarMat);
+    scene.add(corpusNear, corpusFar);
+
+    const grid = new THREE.GridHelper(46, 23, 0x2a3450, 0x222b45);
+    grid.position.set(CLOUD.x, CLOUD.y - SPREAD.y - 2.4, CLOUD.z);
+    grid.material.transparent = true;
+    grid.material.opacity = 0;
+    grid.material.depthWrite = false;
+    scene.add(grid);
+
+    const axesGroup = new THREE.Group();
+    const axisMat = new THREE.LineBasicMaterial({ color: 0x8b96af, transparent: true, opacity: 0 });
+    const dims = [
+      ["DIM-1", new THREE.Vector3(SPREAD.x + 1.6, 0, 0)],
+      ["DIM-2", new THREE.Vector3(0, SPREAD.y + 1.6, 0)],
+      ["DIM-3", new THREE.Vector3(0, 0, SPREAD.z + 1.6)],
+    ];
+    const dimSprites = [];
+    dims.forEach(([name, dir]) => {
+      const geo = new THREE.BufferGeometry().setFromPoints([
+        CLOUD.clone().sub(dir), CLOUD.clone().add(dir),
+      ]);
+      axesGroup.add(new THREE.Line(geo, axisMat));
+      const sp = makeTextSprite(name, { font: `500 24px ${MONO}`, color: "#8B96AF", scalePerPx: 0.009, fog: false });
+      sp.position.copy(CLOUD.clone().add(dir.clone().multiplyScalar(1.12)));
+      sp.material.opacity = 0;
+      dimSprites.push(sp);
+      axesGroup.add(sp);
+    });
+    const umapLabel = makeTextSprite("UMAP OF 1024-D EMBEDDINGS", {
+      font: `500 24px ${MONO}`, color: "#8B96AF", scalePerPx: 0.0095, fog: false,
+    });
+    umapLabel.position.set(CLOUD.x, CLOUD.y - SPREAD.y - 1.4, CLOUD.z + SPREAD.z + 1);
+    umapLabel.material.opacity = 0;
+    axesGroup.add(umapLabel);
+    scene.add(axesGroup);
+
+    // ---------------- starfield ----------------
+    const starRnd = mulberry32(7);
+    const starPos = new Float32Array(520 * 3);
+    for (let i = 0; i < 520; i++) {
+      const a = starRnd() * Math.PI * 2, ph = Math.acos(starRnd() * 2 - 1), r = 130 + starRnd() * 150;
+      starPos[i * 3] = Math.sin(ph) * Math.cos(a) * r;
+      starPos[i * 3 + 1] = Math.cos(ph) * r;
+      starPos[i * 3 + 2] = Math.sin(ph) * Math.sin(a) * r - 20;
+    }
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPos, 3));
+    const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+      color: 0x9aa4bc, size: 0.5, map: dotTex, transparent: true, opacity: 0.5,
+      depthWrite: false, sizeAttenuation: true, blending: THREE.AdditiveBlending, fog: false,
+    }));
+    scene.add(stars);
+
+    // ---------------- query star + beams ----------------
+    const beamGroup = new THREE.Group();
+    scene.add(beamGroup);
+
+    const queryEnd = new THREE.Vector3(
+      CLOUD.x + QUERY.e[0] * SPREAD.x,
+      CLOUD.y + QUERY.e[1] * SPREAD.y,
+      CLOUD.z + QUERY.e[2] * SPREAD.z
+    );
+    const queryGroup = new THREE.Group();
+    const queryMat = new THREE.MeshBasicMaterial({ color: 0xfde047 });
+    const queryMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(0.34, 1), queryMat);
+    const queryGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: 0xfde047, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    queryGlow.scale.set(2.4, 2.4, 1);
+    const queryLabel = makeTextSprite("query", { font: `600 26px ${MONO}`, color: "#FDE047", scalePerPx: 0.007, fog: false });
+    queryLabel.center.set(0.5, 2.2);
+    queryGroup.add(queryMesh, queryGlow, queryLabel);
+    queryGroup.visible = false;
+    scene.add(queryGroup);
+
+    // ---------------- interaction state ----------------
+    let targetL = 0, curL = 0, fly = 0;
+    let thetaT = 0, phiT = Math.PI / 2, theta = 0, phi = Math.PI / 2;
+    let dragging = false, moved = 0, downXY = [0, 0];
+    let lastInteract = performance.now();
+    const pointers = new Map();
+    let pinchDist = 0;
+    let pointerNDC = new THREE.Vector2(-2, -2);
+    let hover = null; // {kind, idx}
+    let selected = -1;
+    let retrieved = [];
+    let beams = []; // {line, mat, srcRef:()=>Vec3, dstIdx, prog, delay}
+    let queryAnim = null; // {t, from}
+    let lastStage = -1;
+    let time = 0;
+
+    const raycaster = new THREE.Raycaster();
+
+    const setFly = (v) => { fly = v; setFlyUi(v); };
+    const bump = () => { lastInteract = performance.now(); };
+
+    // ---------------- FX ----------------
+    const clearFX = (keepPanel = false) => {
+      beams.forEach((b) => {
+        beamGroup.remove(b.line);
+        b.line.geometry.dispose();
+        b.mat.dispose();
+      });
+      beams = [];
+      retrieved = [];
+      selected = -1;
+      queryAnim = null;
+      queryGroup.visible = false;
+      if (!keepPanel) setPanel(null);
+    };
+
+    const makeBeam = (srcRef, dstIdx, color, delay) => {
+      const N = 26;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(N * 3), 3));
+      geo.setDrawRange(0, 0);
+      const mat = new THREE.LineBasicMaterial({
+        color, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const line = new THREE.Line(geo, mat);
+      beamGroup.add(line);
+      beams.push({ line, mat, srcRef, dstIdx, prog: 0, delay, N });
+    };
+
+    const simScore = (d) => clamp(0.968 - d / (SPREAD.x * 2.35), 0.55, 0.98);
+
+    const nearestChunks = (from, excludeIdx, k) =>
+      endPos
+        .map((p, i) => ({ i, d: p.distanceTo(from) }))
+        .filter((o) => o.i !== excludeIdx)
+        .sort((a, b) => a.d - b.d)
+        .slice(0, k);
+
+    const selectChunk = (i) => {
+      clearFX(true);
+      selected = i;
+      const nn = nearestChunks(endPos[i], i, 4);
+      nn.forEach((o, k) => makeBeam(() => chunkEntries[i].grp.position, o.i, 0x22d3ee, k * 0.14));
+      retrieved = nn.map((o) => o.i);
+      setPanel({
+        kind: "nn",
+        src: i,
+        items: nn.map((o) => ({ idx: o.i, sim: simScore(o.d) })),
+      });
+      bump();
+    };
+
+    const runRetrieval = () => {
+      clearFX(true);
+      if (targetL < 4.3) targetL = 4.7;
+      setFly(0);
+      queryGroup.visible = true;
+      const camDir = new THREE.Vector3();
+      camera.getWorldDirection(camDir);
+      const from = camera.position.clone().add(camDir.multiplyScalar(4)).add(new THREE.Vector3(-1.4, -1.2, 0));
+      queryGroup.position.copy(from);
+      queryAnim = { t: 0, from };
+      const nn = nearestChunks(queryEnd, -1, 4);
+      retrieved = nn.map((o) => o.i);
+      nn.forEach((o, k) => makeBeam(() => queryGroup.position, o.i, 0xfde047, 0.9 + k * 0.16));
+      setPanel({
+        kind: "query",
+        items: nn.map((o) => ({ idx: o.i, sim: simScore(o.d) })),
+      });
+      bump();
+    };
+
+    const reset = () => {
+      targetL = 0; setFly(0);
+      thetaT = 0; phiT = Math.PI / 2;
+      clearFX();
+      bump();
+    };
+
+    const toggleFly = () => {
+      if (fly !== 0) setFly(0);
+      else setFly(curL < L_MAX / 2 ? 1 : -1);
+      bump();
+    };
+
+    const jumpStage = (i) => { targetL = STAGES[i].at + (i === 3 ? 0.5 : 0.05); setFly(0); bump(); };
+
+    apiRef.current = { reset, toggleFly, runRetrieval, jumpStage, clearFX };
+
+    // ---------------- input ----------------
+    const onWheel = (e) => {
+      e.preventDefault();
+      setFly(0);
+      const k = e.ctrlKey ? 0.0048 : 0.0022;
+      targetL = clamp(targetL - e.deltaY * k, 0, L_MAX);
+      bump();
+    };
+
+    const pDist = () => {
+      const p = [...pointers.values()];
+      return Math.hypot(p[0][0] - p[1][0], p[0][1] - p[1][1]);
+    };
+
+    const onPointerDown = (e) => {
+      pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pointers.size === 1) { dragging = true; moved = 0; downXY = [e.clientX, e.clientY]; }
+      if (pointers.size === 2) pinchDist = pDist();
+      bump();
+    };
+
+    const onPointerMove = (e) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointerNDC.set(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      if (tooltipRef.current) {
+        tooltipRef.current.style.left = `${Math.min(e.clientX + 16, window.innerWidth - 280)}px`;
+        tooltipRef.current.style.top = `${Math.min(e.clientY + 14, window.innerHeight - 60)}px`;
+      }
+      if (!pointers.has(e.pointerId)) return;
+      const prev = pointers.get(e.pointerId);
+      pointers.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pointers.size === 2) {
+        const d = pDist();
+        if (pinchDist > 0) {
+          setFly(0);
+          targetL = clamp(targetL + Math.log2(d / pinchDist) * 1.35, 0, L_MAX);
+        }
+        pinchDist = d;
+        bump();
+      } else if (dragging) {
+        const dx = e.clientX - prev[0], dy = e.clientY - prev[1];
+        moved += Math.abs(dx) + Math.abs(dy);
+        thetaT -= dx * 0.0052;
+        phiT = clamp(phiT - dy * 0.0042, 0.32, Math.PI - 0.32);
+        bump();
+      }
+    };
+
+    const onPointerUp = (e) => {
+      pointers.delete(e.pointerId);
+      pinchDist = 0;
+      if (dragging && pointers.size === 0) {
+        dragging = false;
+        const dist = Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]);
+        if (dist < 6 && moved < 8) {
+          // click
+          if (hover && hover.kind === "chunk") selectChunk(hover.idx);
+          else if (selected !== -1 || queryAnim || beams.length) clearFX();
+        }
+      }
+    };
+
+    const onKey = (e) => {
+      if (e.key === "r" || e.key === "R") reset();
+      if (e.key === "f" || e.key === "F" || e.key === " ") { e.preventDefault(); toggleFly(); }
+      if (e.key === "q" || e.key === "Q") runRetrieval();
+      if (e.key === "Escape") clearFX();
+      if (e.key >= "1" && e.key <= "4") jumpStage(Number(e.key) - 1);
+    };
+
+    const onResize = () => {
+      renderer.setSize(mount.clientWidth, mount.clientHeight);
+      camera.aspect = mount.clientWidth / mount.clientHeight;
+      camera.updateProjectionMatrix();
+    };
+
+    mount.addEventListener("wheel", onWheel, { passive: false });
+    mount.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
+
+    // ---------------- main loop ----------------
+    const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), tmpC = new THREE.Vector3();
+    let raf;
+
+    const tick = () => {
+      time += 1 / 60;
+
+      // travel
+      if (fly !== 0) {
+        targetL = clamp(targetL + fly * (reduced ? 0.006 : 0.0105), 0, L_MAX);
+        if (targetL <= 0 || targetL >= L_MAX) setFly(0);
+      }
+      curL += (targetL - curL) * 0.075;
+      const L = curL;
+
+      // stage bands (pure functions of L)
+      const tB = band(L, 0.7, 1.5);
+      const tC = band(L, 2.2, 3.3);
+      const tD = band(L, 3.5, 4.4);
+      const tE = band(L, 2.25, 2.95) * (1 - band(L, 3.3, 3.9));
+      const tT = band(L, 2.3, 4.05); // camera target: page → cloud
+      const tCe = smoothstep(tC);
+
+      // ---- camera path ----
+      let dist = lerp(12.8, 7.4, band(L, 0, 2.35));
+      dist = lerp(dist, 16.5, band(L, 2.45, 4.1));
+      dist = lerp(dist, 9.2, band(L, 4.35, 5));
+      tmpA.set(0, 0, 0).lerp(CLOUD, tT); // orbit target
+
+      // idle drift deep in the cloud
+      if (!reduced && fly === 0 && performance.now() - lastInteract > 2500 && L > 3.8) {
+        thetaT += 0.0009;
+      }
+      theta += (thetaT - theta) * 0.08;
+      phi += (phiT - phi) * 0.08;
+
+      camera.position.set(
+        tmpA.x + dist * Math.sin(phi) * Math.sin(theta),
+        tmpA.y + dist * Math.cos(phi),
+        tmpA.z + dist * Math.sin(phi) * Math.cos(theta)
+      );
+      camera.lookAt(tmpA);
+
+      // ---- page + boxes ----
+      const pageOpacity = 1 - band(L, 2.7, 3.5);
+      paperMat.opacity = pageOpacity;
+      shadowMat.opacity = pageOpacity * 0.9;
+      pageGroup.visible = pageOpacity > 0.02;
+      // pointer-parallax tilt while reading the page
+      const tiltAmt = reduced ? 0 : (1 - band(L, 1.6, 2.2)) * 0.05;
+      pageGroup.rotation.y += (pointerNDC.x * tiltAmt - pageGroup.rotation.y) * 0.06;
+      pageGroup.rotation.x += (-pointerNDC.y * tiltAmt * 0.8 - pageGroup.rotation.x) * 0.06;
+
+      boxEntries.forEach((b, i) => {
+        const gone = band(L, 2.2 + i * 0.045, 2.55 + i * 0.045);
+        const vis = tB * (1 - gone) * pageOpacity;
+        b.grp.visible = vis > 0.02;
+        b.grp.scale.z = Math.max(0.001, tB);
+        b.fillMat.opacity = 0.13 * vis * (hover && hover.kind === "box" && hover.idx === i ? 2.2 : 1);
+        b.edgeMat.opacity = 0.95 * vis;
+        b.chip.material.opacity = vis;
+      });
+
+      // ---- chunks along bezier through the encoder ----
+      chunkEntries.forEach((c, i) => {
+        const st = i * 0.045;
+        const ti = smoothstep(band(L, 2.2 + st, 3.3 + st));
+        const appear = band(L, 2.2 + st, 2.5 + st);
+        const p = c.grp.position;
+        const A = startPos[i], M = midPos[i], B = endPos[i];
+        const it = 1 - ti;
+        p.set(
+          it * it * A.x + 2 * it * ti * M.x + ti * ti * B.x,
+          it * it * A.y + 2 * it * ti * M.y + ti * ti * B.y,
+          it * it * A.z + 2 * it * ti * M.z + ti * ti * B.z
+        );
+        c.grp.visible = appear > 0.01;
+
+        const isHover = hover && hover.kind === "chunk" && hover.idx === i;
+        const isHot = selected === i || retrieved.includes(i);
+        const pulse = isHot ? 1 + 0.22 * Math.sin(time * 6 + i) : 1;
+        const s = lerp(1.0, 0.68, tCe) * appear * (isHover ? 1.4 : 1) * pulse;
+        c.sph.scale.setScalar(s);
+        c.glow.scale.set(1.7 * s * (1 + tD * 0.5), 1.7 * s * (1 + tD * 0.5), 1);
+        c.glow.material.opacity = 0.85 * appear;
+        c.label.material.opacity = (isHover || isHot ? 1 : tD * 0.85) * appear * band(L, 3.2, 3.8);
+        c.mat.color.copy(c.baseColor).lerp(new THREE.Color("#ffffff"), isHot ? 0.4 : isHover ? 0.25 : 0);
+      });
+
+      // ---- encoder ----
+      const encOp = tE;
+      ringMat1.opacity = encOp * 0.9;
+      ringMat2.opacity = encOp * 0.75;
+      encLabel.material.opacity = encOp;
+      encoder.visible = encOp > 0.01;
+      if (encoder.visible) { ring1.rotation.z -= 0.006; ring2.rotation.z += 0.011; }
+
+      // ---- deep space ----
+      corpusNearMat.opacity = tD * 0.85;
+      corpusFarMat.opacity = tD * 0.55;
+      grid.material.opacity = tD * 0.16;
+      axisMat.opacity = tD * 0.5;
+      dimSprites.forEach((sp) => (sp.material.opacity = tD * 0.9));
+      umapLabel.material.opacity = tD * 0.8;
+      stars.material.opacity = 0.35 + tD * 0.3;
+
+      // ---- query flight ----
+      if (queryAnim) {
+        queryAnim.t = Math.min(1, queryAnim.t + 1 / 66);
+        const qt = smoothstep(queryAnim.t);
+        queryGroup.position.lerpVectors(queryAnim.from, queryEnd, qt);
+        queryMesh.rotation.x += 0.03; queryMesh.rotation.y += 0.045;
+      }
+
+      // ---- beams ----
+      beams.forEach((b) => {
+        if (b.delay > 0) { b.delay -= 1 / 60; return; }
+        b.prog = Math.min(1, b.prog + 1 / 24);
+        const src = b.srcRef();
+        const dst = chunkEntries[b.dstIdx].grp.position;
+        const attr = b.line.geometry.attributes.position;
+        for (let k = 0; k < b.N; k++) {
+          const t = k / (b.N - 1);
+          attr.array[k * 3] = lerp(src.x, dst.x, t);
+          attr.array[k * 3 + 1] = lerp(src.y, dst.y, t) + Math.sin(t * Math.PI) * 0.35;
+          attr.array[k * 3 + 2] = lerp(src.z, dst.z, t);
+        }
+        attr.needsUpdate = true;
+        b.line.geometry.setDrawRange(0, Math.max(2, Math.floor(b.prog * b.N)));
+        b.mat.opacity = 0.35 + 0.55 * (0.5 + 0.5 * Math.sin(time * 5));
+      });
+
+      // ---- hover raycast ----
+      let newHover = null;
+      if (!dragging && pointers.size === 0) {
+        raycaster.setFromCamera(pointerNDC, camera);
+        const targets = [];
+        if (tCe < 0.6 && tB > 0.4 && pageGroup.visible) targets.push(...boxMeshes);
+        if (tCe > 0.2) targets.push(...chunkMeshes.filter((m) => m.parent.visible));
+        const hits = raycaster.intersectObjects(targets, false);
+        if (hits.length) newHover = hits[0].object.userData;
+      }
+      if (JSON.stringify(newHover) !== JSON.stringify(hover)) {
+        hover = newHover;
+        const tip = tooltipRef.current;
+        if (tip) {
+          if (hover) {
+            const el = ELEMENTS[hover.idx];
+            tip.textContent =
+              hover.kind === "box"
+                ? `{"type":"${el.type}","bbox":[${el.x},${el.y},${el.w},${el.h}],"conf":${confs[hover.idx].toFixed(2)}}`
+                : `${el.type.toUpperCase()} · ${el.id} · ${el.tok} tok · e=[${el.e.map((v) => v.toFixed(2)).join(", ")}]`;
+            tip.style.opacity = "1";
+          } else tip.style.opacity = "0";
+        }
+        renderer.domElement.style.cursor = hover ? "pointer" : dragging ? "grabbing" : "grab";
+      }
+
+      // ---- HUD via refs (no re-render) ----
+      const idx = L < 0.9 ? 0 : L < 2.3 ? 1 : L < 3.7 ? 2 : 3;
+      if (idx !== lastStage) {
+        lastStage = idx;
+        setStageIdx(idx);
+        if (stageNumRef.current) stageNumRef.current.textContent = `STAGE ${idx + 1}/4`;
+        if (stageNameRef.current) stageNameRef.current.textContent = STAGES[idx].name;
+        if (stageSubRef.current) stageSubRef.current.textContent = STAGES[idx].sub;
+      }
+      if (railDotRef.current) railDotRef.current.style.left = `${(L / L_MAX) * 100}%`;
+      if (legendRef.current) legendRef.current.style.opacity = tD;
+
+      renderer.render(scene, camera);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    // ---------------- cleanup ----------------
+    return () => {
+      cancelAnimationFrame(raf);
+      mount.removeEventListener("wheel", onWheel);
+      mount.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+      renderer.dispose();
+      if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  // ---------------- overlay UI ----------------
+  const btn = {
+    fontFamily: MONO, fontSize: 12, letterSpacing: "0.04em", color: "#DCE3F2",
+    background: "rgba(255,255,255,0.055)", border: "1px solid rgba(255,255,255,0.14)",
+    borderRadius: 8, padding: "7px 14px", cursor: "pointer", pointerEvents: "auto",
+  };
+
+  const panelItems = panel ? panel.items : [];
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, overflow: "hidden", touchAction: "none", userSelect: "none",
+        background: "radial-gradient(1200px 800px at 50% 42%, #101830 0%, #0A0F1F 55%, #070B16 100%)",
+        color: "#E4E9F4", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+      }}
+    >
+      <div ref={mountRef} style={{ position: "absolute", inset: 0, cursor: "grab" }} />
+
+      {/* tooltip */}
+      <div
+        ref={tooltipRef}
+        style={{
+          position: "fixed", left: 0, top: 0, opacity: 0, transition: "opacity 120ms",
+          pointerEvents: "none", fontFamily: MONO, fontSize: 11, color: "#DCE3F2",
+          background: "rgba(13,19,38,0.88)", border: "1px solid rgba(255,255,255,0.14)",
+          borderRadius: 7, padding: "6px 10px", maxWidth: 300, whiteSpace: "nowrap", zIndex: 30,
+        }}
+      />
+
+      {/* stage HUD */}
+      <div style={{ position: "absolute", left: 26, top: 22, pointerEvents: "none" }}>
+        <div ref={stageNumRef} style={{ fontFamily: MONO, fontSize: 11, letterSpacing: "0.22em", color: "#7E89A3" }}>
+          STAGE 1/4
+        </div>
+        <div ref={stageNameRef} style={{ fontSize: 24, fontWeight: 650, letterSpacing: "-0.01em", marginTop: 4 }}>
+          {STAGES[0].name}
+        </div>
+        <div ref={stageSubRef} style={{ fontFamily: MONO, fontSize: 12, color: "#8B96AF", marginTop: 4 }}>
+          {STAGES[0].sub}
+        </div>
+      </div>
+
+      {/* controls */}
+      <div style={{ position: "absolute", right: 26, top: 22, display: "flex", gap: 8 }}>
+        <button style={btn} onClick={() => apiRef.current.runRetrieval && apiRef.current.runRetrieval()}>
+          ⌕ run retrieval
+        </button>
+        <button style={btn} onClick={() => apiRef.current.toggleFly && apiRef.current.toggleFly()}>
+          {flyUi !== 0 ? "⏸ pause" : stageIdx < 2 ? "⏵ fly in" : "⏴ fly out"}
+        </button>
+        <button style={btn} onClick={() => apiRef.current.reset && apiRef.current.reset()}>reset</button>
+      </div>
+
+      {/* legend (deep space) */}
+      <div
+        ref={legendRef}
+        style={{
+          position: "absolute", left: 26, bottom: 96, opacity: 0, pointerEvents: "none",
+          fontFamily: MONO, fontSize: 11, color: "#9AA4BC", lineHeight: 1.9,
+        }}
+      >
+        <div><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: "#34D399", marginRight: 8, boxShadow: "0 0 8px #34D399" }} />this page's chunks</div>
+        <div><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: "#7E8AA8", marginRight: 8 }} />rest of the corpus</div>
+        <div><span style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: "#FDE047", marginRight: 8, boxShadow: "0 0 8px #FDE047" }} />query vector</div>
+      </div>
+
+      {/* results panel */}
+      {panel && (
+        <div
+          style={{
+            position: "absolute", right: 26, top: 84, width: 292, pointerEvents: "auto",
+            background: "rgba(13,19,38,0.78)", border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 12, padding: "16px 16px 12px", backdropFilter: "blur(10px)", zIndex: 20,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div style={{ fontFamily: MONO, fontSize: 10.5, letterSpacing: "0.2em", color: "#7E89A3" }}>
+              {panel.kind === "query" ? "RETRIEVAL · TOP-4" : "NEAREST NEIGHBOURS"}
+            </div>
+            <button
+              onClick={() => apiRef.current.clearFX && apiRef.current.clearFX()}
+              style={{ ...btn, padding: "1px 8px", fontSize: 13, lineHeight: "18px" }}
+            >×</button>
+          </div>
+
+          {panel.kind === "query" ? (
+            <div style={{ marginTop: 10, fontFamily: MONO, fontSize: 12, color: "#FDE047" }}>
+              "{QUERY.text}"
+            </div>
+          ) : (
+            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", background: ELEMENTS[panel.src].c, boxShadow: `0 0 8px ${ELEMENTS[panel.src].c}` }} />
+              <span style={{ fontFamily: MONO, fontSize: 12, color: "#DCE3F2" }}>
+                {ELEMENTS[panel.src].type.toLowerCase()} · {ELEMENTS[panel.src].id} · {ELEMENTS[panel.src].tok} tok
+              </span>
+            </div>
+          )}
+
+          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 9 }}>
+            {panelItems.map((it, rank) => {
+              const el = ELEMENTS[it.idx];
+              return (
+                <div key={el.id}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontFamily: MONO, fontSize: 11.5, color: "#C6CEE2" }}>
+                    <span>
+                      <span style={{ color: "#7E89A3" }}>{rank + 1} </span>
+                      <span style={{ color: el.c }}>●</span> {el.type.toLowerCase()} · {el.id}
+                    </span>
+                    <span style={{ color: "#DCE3F2" }}>{it.sim.toFixed(3)}</span>
+                  </div>
+                  <div style={{ marginTop: 4, height: 3, borderRadius: 2, background: "rgba(255,255,255,0.08)" }}>
+                    <div style={{ width: `${((it.sim - 0.5) / 0.5) * 100}%`, height: "100%", borderRadius: 2, background: `linear-gradient(90deg, ${el.c}, #DCE3F2)` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 12, fontFamily: MONO, fontSize: 10, color: "#7E89A3", letterSpacing: "0.05em" }}>
+            {panel.kind === "query" ? "cosine sim · RRF with BM25 → rerank → context" : "cosine similarity in 1024-d (UMAP shown)"}
+          </div>
+        </div>
+      )}
+
+      {/* depth rail */}
+      <div style={{ position: "absolute", left: "50%", bottom: 40, transform: "translateX(-50%)", width: "min(420px, 60vw)" }}>
+        <div style={{ position: "relative", height: 2, background: "rgba(255,255,255,0.14)", borderRadius: 1 }}>
+          {STAGES.map((s, i) => (
+            <div
+              key={i}
+              onClick={() => apiRef.current.jumpStage && apiRef.current.jumpStage(i)}
+              title={s.name}
+              style={{
+                position: "absolute", left: `${(s.at / L_MAX) * 100}%`, top: -8, width: 18, height: 18,
+                transform: "translateX(-50%)", cursor: "pointer", pointerEvents: "auto",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}
+            >
+              <div style={{
+                width: 8, height: 8, borderRadius: "50%",
+                background: stageIdx >= i ? "#DCE3F2" : "rgba(255,255,255,0.25)",
+              }} />
+            </div>
+          ))}
+          <div
+            ref={railDotRef}
+            style={{
+              position: "absolute", left: 0, top: -5, width: 12, height: 12, borderRadius: "50%",
+              transform: "translateX(-50%)", background: "#818CF8", boxShadow: "0 0 12px #818CF8",
+              pointerEvents: "none",
+            }}
+          />
+        </div>
+        <div style={{ textAlign: "center", marginTop: 14, fontFamily: MONO, fontSize: 11, color: "#7E89A3", letterSpacing: "0.05em" }}>
+          drag orbit · scroll / pinch travel · hover boxes & chunks · click chunk = neighbours · Q retrieval · F fly · R reset
+        </div>
+      </div>
+    </div>
+  );
+}
